@@ -24,6 +24,12 @@ log/
 *.egg-info/
 .installed.cfg
 *.egg
+.temp_*
+*.npy
+data/
+old_files/
+img/
+model/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
