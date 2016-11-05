@@ -1,0 +1,49 @@
+{
+    "analysis": "No descriptors specified. You should indicate which descriptors you want with the 'descriptors' request parameter.",
+    "analysis_frames": "http://www.freesound.org/data/analysis/100/100855_1272424_frames.json",
+    "analysis_stats": "http://www.freesound.org/apiv2/sounds/100855/analysis/",
+    "avg_rating": 0.0,
+    "bitdepth": 0,
+    "bitrate": 1378,
+    "bookmark": "https://www.freesound.org/apiv2/sounds/100855/bookmark/",
+    "channels": 2,
+    "comment": "https://www.freesound.org/apiv2/sounds/100855/comment/",
+    "comments": "http://www.freesound.org/apiv2/sounds/100855/comments/",
+    "created": "2010-07-10T00:23:17",
+    "description": "Field recording of sitting inside a bus with the hum of an air conditioner. Air conditioner shuts off in last 15 seconds.",
+    "download": "https://www.freesound.org/apiv2/sounds/100855/download/",
+    "duration": 108.2,
+    "filesize": 2597618,
+    "geotag": null,
+    "id": 100855,
+    "images": {
+        "spectral_l": "http://www.freesound.org/data/displays/100/100855_1272424_spec_L.jpg",
+        "spectral_m": "http://www.freesound.org/data/displays/100/100855_1272424_spec_M.jpg",
+        "waveform_l": "http://www.freesound.org/data/displays/100/100855_1272424_wave_L.png",
+        "waveform_m": "http://www.freesound.org/data/displays/100/100855_1272424_wave_M.png"
+    },
+    "license": "http://creativecommons.org/licenses/by/3.0/",
+    "name": "insidebushumofairconditioner.mp3",
+    "num_comments": 0,
+    "num_downloads": 23,
+    "num_ratings": 0,
+    "pack": "http://www.freesound.org/apiv2/packs/6446/",
+    "previews": {
+        "preview-hq-mp3": "http://www.freesound.org/data/previews/100/100855_1272424-hq.mp3",
+        "preview-hq-ogg": "http://www.freesound.org/data/previews/100/100855_1272424-hq.ogg",
+        "preview-lq-mp3": "http://www.freesound.org/data/previews/100/100855_1272424-lq.mp3",
+        "preview-lq-ogg": "http://www.freesound.org/data/previews/100/100855_1272424-lq.ogg"
+    },
+    "rate": "https://www.freesound.org/apiv2/sounds/100855/rate/",
+    "samplerate": 44100.0,
+    "similar_sounds": "http://www.freesound.org/apiv2/sounds/100855/similar/",
+    "tags": [
+        "air-conditioner",
+        "bus",
+        "field-recording",
+        "inside"
+    ],
+    "type": "mp3",
+    "url": "http://www.freesound.org/people/edbles/sounds/100855/",
+    "username": "edbles"
+}
