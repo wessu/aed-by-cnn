@@ -10,6 +10,8 @@ import threading
 US_Dict_filepath = 'data/feature/US_Dict'
 EK_Dict_filepath = 'data/feature/8K_Dict'
 TW_Dict_filepath = 'data/feature/TW_Dict'
+global delta
+global augment
 
 ##### UTILITY FUNCTIONS #####
 def getDictDir(dict_type):
@@ -32,9 +34,6 @@ def load_files(data_dir, fn_list):
     for fn, fl_type in fn_list:
         ft_dict = np.load(os.path.join(data_dir, fn+'.npy')).item()
         add_feature(data_list, ft_dict, fl_type)
-        # if augment:
-        #     add_feature(data_list, ft_dict, '5db')
-        #     add_feature(data_list, ft_dict, '-5db')
     return data_list
 
 def fit_scaler(sc_list, data_list):
@@ -59,6 +58,13 @@ def standardize(sc_list, data_list):
             feat[0] = scaler.transform(feat[0])
 
 ##### MULTITHREADING #####
+threadLock = threading.Lock()
+
+def printMsg(msg):
+    threadLock.acquire()
+    print(msg)
+    threadLock.release()
+
 class myThread(threading.Thread):
     def __init__(self, name, load_dir, fl_list, sc_list, save_dir):
         threading.Thread.__init__(self)
@@ -68,14 +74,17 @@ class myThread(threading.Thread):
         self.sc_list = sc_list
         self.save_dir = save_dir
     def run(self):
-        print "Starting " + self.name
+        printMsg("Starting " + self.name) 
         num_fl = 0
         args_list = []
         for fn_list, idx in my_iterator(self.fl_list, 500):
             args_list.append((fn_list, idx, self.load_dir, 
                          self.sc_list, self.save_dir, self.name))
             num_fl += len(fn_list)
-        print('{} data: {}'.format(self.name, num_fl))
+        printMsg('{} data: {}'.format(self.name, num_fl))
+        std_by_multiprocessing(args_list)
+
+        
 
 ##### MULTIPROCESSING #####
 def std_by_multiprocessing(args_list):
@@ -91,12 +100,14 @@ def standardize_list(args):
     ft_batches = np.asarray([data_list[i:i+1] for i in range(0, len(data_list), 1)])
     save_fp = os.path.join(save_dir, name+'_'+str(idx)+'.npy')
     np.save(save_fp, ft_batches)
+    printMsg('{} finished.'.format(name))
 
 
 ##### MAIN FUNCTION #####
-def load_dataset(training_type, testing_type, test_fold, augment, delta, test_only, model_file):
+def load_dataset(training_type, testing_type, test_fold, scalers_file):
     train_dir = getDictDir(training_type)
     test_dir = getDictDir(testing_type)
+    test_only = ( scalers_file and os.path.isfile(scalers_file) )
 
     # select testing files
     if not os.path.isdir(test_fold):
@@ -110,8 +121,13 @@ def load_dataset(training_type, testing_type, test_fold, augment, delta, test_on
             fid = fn.split('-')[0]
             test_file_set.add(fid)
 
-    save_dir = 'var/stdfeat/' + model_file if model_file != None \
-                else 'var/stdfeat/tmp{}'.format(int(time.time()*100000))
+    if test_only:
+        save_dir = 'var/stdfeat/' + os.path.basename(scalers_file).split('.')[0]
+    elif scalers_file != None:
+        save_dir = 'var/stdfeat/' + scalers_file
+    else:
+        save_dir = 'var/stdfeat/tmp{}'.format(int(time.time()*100000))
+    print('save_dir: {}'.format(save_dir))
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
@@ -120,18 +136,17 @@ def load_dataset(training_type, testing_type, test_fold, augment, delta, test_on
     if test_only:
         # load scalers to standardize testing files
         print('Loading testing files only')
-        sc_fp = 'model/scalers/scaler_' + os.path.basename(model_file)
+        sc_fp = 'model/scalers/scaler_' + os.path.basename(scalers_file)
         sc_list = np.load(sc_fp).tolist()
     else:
         # select training and validation files
-        tv_list = []
+        tmp_tv_list = []
         for fn in os.listdir(train_dir):
             fn = os.path.splitext(fn)[0]
             if fn not in test_file_set:
-                tv_list.append(fn)
+                tmp_tv_list.append(fn)
         
-        np.random.shuffle(tv_list)
-        tmp_tv_list = tv_list
+        np.random.shuffle(tmp_tv_list)
         tv_list = []
         if augment:
             for fn in tmp_tv_list:
@@ -151,9 +166,10 @@ def load_dataset(training_type, testing_type, test_fold, augment, delta, test_on
 
         # create scalers
         sc_list = []
-        for fn_list, idx in my_iterator(tr_list, 500):
+        for fn_list, idx in my_iterator(tr_list, 1000):
             data_list = load_files(train_dir, fn_list)
             fit_scaler(sc_list, data_list)
+            print('{} files to the scalers.'.format(len(data_list)))
 
         # standardize training and validation data and save them
         tr_thread = myThread("train", train_dir, tr_list, sc_list, save_dir)
@@ -163,8 +179,8 @@ def load_dataset(training_type, testing_type, test_fold, augment, delta, test_on
         threads.append(tr_thread)
         threads.append(va_thread)
 
-        if model_file != None:
-            np.save('model/scalers/scaler_' + model_file, sc_list)
+        if scalers_file != None:
+            np.save('model/scalers/scaler_' + scalers_file, sc_list)
         
         # num_tr = 0
         # for fn_list, idx in my_iterator(tr_list, 500):
@@ -222,8 +238,8 @@ def parser():
     # p.add_argument('-s', '--scales', type=int, default=3,
     #                 help='Number of scales (1, 2, or 3)')
     
-    p.add_argument('-m', '--model', type=str, 
-                    help='A pretrained model file')
+    p.add_argument('-s', '--scalers', type=str, 
+                    help='The scaler file')
     
     # p.add_argument('-s', '--std', action='store_true', default=True,
     #                 help='Standardize data')
@@ -258,18 +274,18 @@ def usage():
 if __name__ == '__main__':
     kwargs = {}
     args = parser()
-    kwargs['model_file'] = args.model
+    kwargs['scalers_file'] = args.scalers
     kwargs['training_type'] = args.training
     kwargs['testing_type'] = args.testing
     kwargs['test_fold'] = args.fold
-    kwargs['augment'] = args.augment
-    kwargs['delta'] = args.delta
+    
+    augment = args.augment
+    delta = args.delta
 
     print('training data: {}'.format(kwargs['training_type']))
     print('testing data: {}'.format(kwargs['testing_type']))
-    print('model file: {}'.format(kwargs['model_file']))
-
-    kwargs['test_only'] = ( args.model and os.path.isfile(args.model) )
+    print('scalers file: {}'.format(kwargs['scalers_file']))
+    print('test fold: {}'.format(kwargs['test_fold']))
 
     load_dataset(**kwargs)
     

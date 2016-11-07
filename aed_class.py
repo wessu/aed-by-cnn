@@ -457,7 +457,6 @@ if __name__ == '__main__':
         print('Number of scales should be 1, 2, or 3. Default to 3.')
         
 
-    print('training data: {}'.format(kwargs['training_type']))
     print('testing data: {}'.format(kwargs['testing_type']))
     print('epochs: {}'.format(kwargs['num_epochs']))
     print('stdfeat: {}'.format(kwargs['stdfeat']))

@@ -8,6 +8,7 @@ from multiprocessing import Lock
 from multiprocessing import Manager
 from multiprocessing import Pool
 import time
+from math import ceil
 
 tag_dict = {
     'air_conditioner' : 0,
@@ -23,36 +24,56 @@ tag_dict = {
 }
 MIN_LEN = 180
 NUM_TAG = 10
-out_dir = 'data/feature/TW_Dict/'
+out_dir = 'data/feature/TW2_Dict/'
 
 def _fex(in_fp, fn, target):
 	def ef_log_10000(in_fp):
-		def npad(ol):
-			x = MIN_LEN - ol if (ol < MIN_LEN) else 0
+		def npad(ol, length):
+			x = length - ol if (ol < length) else 0
 			return ((0, x), (0, 0))
 		try:
 			sig = librosa.core.load(in_fp, sr=sr, mono=True)
 			feat_list = []
+			length = 0
 			for ws in win_size:
 				ft = librosa.feature.melspectrogram(sig[0], sr=sr,
 				                                   n_fft=ws,
 				                                   hop_length=hop_size,
 				                                   n_mels=n_mels).T
-				if ft.shape[0] < MIN_LEN:
-					ft = np.pad(ft, pad_width=npad(ft.shape[0]), 
-								mode='constant', constant_values=0)
+				if ft.shape[0] <= MIN_LEN:
+					length = MIN_LEN
+				elif ft.shape[0] <= 500:
+					length = 500
+				elif ft.shape[0] <= 1000:
+					length = 1000
+				elif ft.shape[0] <= 1500:
+					length = 1500
+				elif ft.shape[0] <= 2500:
+					length = 2500
+				elif ft.shape[0] <= 110000:
+					length = int(ceil(ft.shape[0]/5000.0))*5000
+				else:
+					return None, None
+
+				ft = np.pad(ft, pad_width=npad(ft.shape[0], length), 
+							mode='constant', constant_values=0)
 				ft = np.log(1+10000*ft)
 				delta = librosa.feature.delta(ft, axis=1)
 
 				# logarithmize
 				feat_list.append(np.array([ft, delta], dtype=np.float32))
-			return feat_list
+			return feat_list, length
 		except Exception as err:
 			print('ef_log_10000: {} extraction failed. Error: {}'.format(in_fp, err))
 			return None
 
+	features, length = ef_log_10000(in_fp)
 	if fn in all_feat:
-		feat = np.load(out_dir+fn+'.npy').item()
+		try:
+			feat = np.load(out_dir+str(length)+'/'+fn+'.npy').item()
+		except Exception as err:
+			print(err)
+			feat = {}
 	else:
 		feat = {}
 		# all_feat.append(fn)
@@ -62,9 +83,9 @@ def _fex(in_fp, fn, target):
 		# print('{} extracted. length: {}'.format(fn, len(features[0][0])))
 		# lock.release()
 
-	features = ef_log_10000(in_fp)
-	feat[aug_type] = (features, target, fn)
-	np.save(out_dir+fn+'.npy', feat)
+	if features:
+		feat[aug_type] = (features, target, fn)
+		np.save(out_dir+str(length)+'/'+fn+'.npy', feat)
 
 def _func_tag_label(args):
 	try:
