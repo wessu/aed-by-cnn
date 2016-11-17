@@ -17,6 +17,12 @@ from lasagne import layers
 import layers as cl
 from sklearn import preprocessing as pp
 import models
+import signal
+import threading
+import multiprocessing
+from multiprocessing import Process, Queue, Manager, Lock, Pool
+
+import functions 
 
 # import theano.sandbox.cuda
 # theano.sandbox.cuda.use('gpu3')
@@ -88,7 +94,6 @@ def Han_cnn(input_var=None):
 
 
 def JY_cnn(input_var_list, gaussian, delta):
-    
     n_sources = len(input_var_list)
     n_early_conv = 2
     early_pool_size = 4
@@ -115,7 +120,7 @@ def JY_cnn(input_var_list, gaussian, delta):
             'scan_std_list': [32/d],
             'scan_stride_list': [1],
         },
-        'final_pool_function': T.max,  # T.max
+        'final_pool_function': functions.gated_mean,  # T.max
         'input_size_list': [128 for nn in range(n_sources)],
         'output_size': 10,
         'p_dropout': 0.5,
@@ -132,6 +137,45 @@ def JY_cnn(input_var_list, gaussian, delta):
         return models.fcn_multiscale(input_var_list, **network_options)
 
 
+def FCRNN(input_var_list, delta):
+    n_sources = len(input_var_list)
+    n_early_conv = 2
+    early_pool_size = 4
+
+    d = early_pool_size**n_early_conv
+    num_feat_type = 2 if delta else 1
+
+    network_options = {
+        'early_conv_dict_list': [
+            {'conv_filter_list': [(60, 5) for ii in range(n_early_conv)],
+             'pool_filter_list': [early_pool_size
+                                  for ii in range(n_early_conv)],
+             'pool_stride_list': [None for ii in range(n_early_conv)]}
+            for ii in range(n_sources)
+        ],
+        'late_conv_dict': {
+            'conv_filter_list': [(128, 1), (128, 1)],
+            'pool_filter_list': [None, None],
+            'pool_stride_list': [None, None]
+        },
+        'dense_filter_size': 1,
+        'final_pool_function': T.max,  # T.max
+        'input_size_list': [128 for nn in range(n_sources)],
+        'last_late_conv_size' : 128,
+        'output_size': 10,
+        'p_dropout': 0.5,
+        'num_feat_type': num_feat_type,
+        'num_lstm_unit': 64,
+        'gradient_steps' : 10
+    }
+
+    print('n_early_conv: {}'.format(n_early_conv))
+    print('early_pool_size: {}'.format(early_pool_size))
+    print(network_options)
+
+    return models.fcrnn(input_var_list, **network_options)
+
+
 
 ### These functions are for iterating of separated data
 def get_data_num(data_type, stdfeat):
@@ -142,12 +186,72 @@ def get_data_num(data_type, stdfeat):
                 num += 1
     return num
 
-def iter_data(data_type, num, stdfeat):
-    for i in range(0, num):
-        fn = data_type + '_' + str(i) + '.npy'
-        fp = os.path.join('var/stdfeat', stdfeat, fn)
-        yield np.load(fp)
+def get_fp_list(stdfeat, epochs, shuffle=False):
+    def generate_fp_list(data_type, fp_list):
+        indices = range(0, get_data_num(data_type, stdfeat))
+        if shuffle: 
+            random.shuffle(indices)
+        for i in indices:
+            fn = data_type + '_' + str(i) + '.npy'
+            fp_list.append(os.path.join('var/stdfeat', stdfeat, fn))
+    fp_list = []
+    for e in range(epochs):
+        generate_fp_list('train', fp_list)
+        generate_fp_list('val', fp_list)
+    print('fp_list length: {}'.format(len(fp_list)))
+    return fp_list
+
+def iter_batch(batch_queue, data_type, num):
+    for i in range(num):
+        while True:
+            sleep_time = 0
+            # print('queue size: {}'.format(len(batch_queue)))
+            # print('queue size: {}'.format(batch_queue.qsize()))
+            while len(batch_queue) == 0:
+            # while batch_queue.empty():
+                # tt = 10 if batch_queue.qsize()==0 else 1
+                tt = 10
+                time.sleep(tt)
+                sleep_time += tt
+                # print('sleep {} seconds.'.format(sleep_time))
+            # if sleep_time > 0: 
+                # print('sleep {} seconds.'.format(sleep_time))
+            bt = batch_queue.pop(0)
+            # bt = batch_queue.get(block=False)
+            if type(bt) != type('end'):
+                # print('get one batch!')
+                yield bt
+            else:
+                print('iter end one fp! {}'.format(utils.print_time()))
+                name = multiprocessing.current_process().name
+                print('{} current queue size: {}'.format(name, len(batch_queue)))
+                break
+    # print('End iteration of {}'.format(data_type))
 ### 
+
+def th_loadfile(batch_queue, fp_list):
+    name = multiprocessing.current_process().name
+    for fp in fp_list:
+        while len(batch_queue) > 500:
+        # while batch_queue.full():
+            time.sleep(60)
+            # print('{} sleep for 60 seconds.'.format(name))
+        bts = np.load(fp)
+        # print('{} originally has {} batches.'.format(fp, len(bts)))
+        bts = chop_batches(bts, 5)
+        np.random.shuffle(bts)
+        # print('{} has {} batches to put.'.format(fp, len(bts)))
+        for bt in bts:
+            batch_queue.append(bt)
+            # batch_queue.put(bt, block=True)
+        batch_queue.append('end')
+        # batch_queue.put('end', block=True)
+        print('{} finished {}. {}'.format(name, fp, utils.print_time()))
+        print('{} current queue size: {}'.format(name, len(batch_queue)))
+
+    print('{} ends.'.format(name))
+
+
 
 def get_test_batches(stdfeat):
     te_num = get_data_num('test', stdfeat)
@@ -161,41 +265,22 @@ def get_test_batches(stdfeat):
             test_batches = np.append(test_batches, np.load(fp), axis=0)
     return test_batches
 
-
-def main(stdfeat, num_epochs=300, param_file=None, 
-         model_file=None, testing_type='8k', show_result=False, 
-         frame_level='', continue_train=False, delta=False,
-         gaussian=True, scales=3):
-    # Load the dataset
-    print("Loading data...")
-    test_only = ( model_file and os.path.isfile(model_file) )
-    # train_batches, val_batches, test_batches = load_dataset(training_type, testing_type, 
-    #                                             fold, augment, delta, test_only, model_file)
-    # print('train batches: {}'.format(len(train_batches)))
-    # print('val batches: {}'.format(len(val_batches)))
-    # print('test batches: {}'.format(len(test_batches)))
-
-    # for bats, idx in my_iterator(train_batches, 100):
-    #     np.save('var/stdfeat/train_'+str(idx), bats)
-    # for bats, idx in my_iterator(val_batches, 100):
-    #     np.save('var/stdfeat/val_'+str(idx), bats)
-    # for bats, idx in my_iterator(test_batches, 100):
-    #     np.save('var/stdfeat/test_'+str(idx), bats)
-
-    # return
-    test_batches = get_test_batches(stdfeat)
-    
-
+def init_process(model, scales, gaussian, delta):
     print("Building model and compiling functions...")
     # Prepare Theano variables for inputs and targets
-    n_sources = scales
     input_var_list = [T.tensor4('inputs{}'.format(i))
-                      for i in range(n_sources)]
+                      for i in range(scales)]
     target_var = T.imatrix('targets')
 
     # Create network model
-    network = JY_cnn(input_var_list, gaussian, delta)
-
+    if model == 'jy':
+        print('Building JY CNN...')
+        network = JY_cnn(input_var_list, gaussian, delta)
+        learning_rate = 0.006
+    elif model == 'fcrnn':
+        print('Building FCRNN...')
+        network = FCRNN(input_var_list, delta)
+        learning_rate = 0.0005
 
     print('defining loss function')
     prediction = lasagne.layers.get_output(network)
@@ -207,7 +292,7 @@ def main(stdfeat, num_epochs=300, param_file=None,
     params = lasagne.layers.get_all_params(network, trainable=True)
     # updates = lasagne.updates.nesterov_momentum(
     #         loss, params, learning_rate=0.005, momentum=0.9)
-    updates = lasagne.updates.adagrad(loss, params, learning_rate=0.008)
+    updates = lasagne.updates.adagrad(loss, params, learning_rate=learning_rate)
     
 
     print('defining testing method')
@@ -237,6 +322,192 @@ def main(stdfeat, num_epochs=300, param_file=None,
     val_fn = theano.function(input_var_list + [target_var], 
                 [test_loss, test_acc, test_pred_result, test_prediction, gauss_pred, pre_gauss_pred])
 
+    return train_fn, val_fn, network
+
+def chop_batches(batches, bsize):
+    new_bts = []
+    for bt in batches:
+        for i in range(0, len(bt)/bsize+1):
+            nbt = bt[bsize*i:bsize*(i+1)]
+            if len(nbt) > 0:
+                new_bts.append(nbt)
+    return np.asarray(new_bts)
+
+### Pool
+
+# def initPool(b, l):
+#     global batch_queue
+#     batch_queue = b
+#     global lock
+#     lock = l
+
+def proc_loadfile(batch_queue, lock, idx, fp_list):
+    for fp in fp_list:
+        pool_loadfile((batch_queue, lock, idx, fp))
+
+def pool_loadfile(args):
+    batch_queue, lock, i, fp = args
+    # name = multiprocessing.current_process().name
+    while len(batch_queue) > 200:
+        time.sleep(60)
+        # print('{} sleep for 60 seconds.'.format(name))
+    fn = os.path.basename(fp)
+    # print('Load {} to {}.'.format(fn, i))
+    bts = np.load(fp)
+    bts = chop_batches(bts, 5)
+    np.random.shuffle(bts)
+    lock.acquire()
+    # print('{} got the lock {}.'.format(fn, i))
+    k = 0
+    for bt in bts:
+        batch_queue.append(bt)
+        k+=1
+        # print('{}: {}/{}'.format(fn, k, len(bts)))
+    batch_queue.append('end')
+    # print('Pool finished {}. {}'.format(fn, utils.print_time()))
+    # print('Pool current queue size: {}'.format(len(batch_queue)))
+    # print('{} releasing the lock {}.'.format(fn, i))
+    lock.release()
+
+def generate_fp_list(data_type, stdfeat, shuffle=False):
+    fp_list = []
+    indices = range(0, get_data_num(data_type, stdfeat))
+    if shuffle: 
+        random.shuffle(indices)
+    for i in indices:
+        fn = data_type + '_' + str(i) + '.npy'
+        fp_list.append(os.path.join('var/stdfeat', stdfeat, fn))
+    return fp_list
+
+def gen_pool_fp_list(data_type, stdfeat, qlts, shuffle=True):
+    fp_list = generate_fp_list(data_type, stdfeat, shuffle)
+    l = len(qlts)
+    n_fp_list = []
+    for idx, fp in enumerate(fp_list):
+        queue, lock, i = qlts[idx%l]
+        n_fp_list.append((queue, lock, i, fp))
+    random.shuffle(n_fp_list)
+    return n_fp_list
+
+def gen_procs(qlts, fp_list):
+    proc_list = []
+    n_cores = len(qlts)
+    for i in range(n_cores):
+        queue, lock, idx = qlts[i] 
+        fpl = fp_list[i::n_cores]
+        name = 'loadfile_proc_'+str(i)
+        proc = Process(target=proc_loadfile, args=(queue, lock, idx, fpl),
+                        name=name)
+        proc.start()
+        proc_list.append(proc)
+    return proc_list
+
+
+def new_iter_batch(qlts, num):
+    n = 0
+    n_cores = len(qlts)
+    while n < num:
+        empty = 0
+        for qlt in qlts:
+            batch_queue, lock, i = qlt
+            if len(batch_queue) == 0:
+                empty += 1
+                continue
+            if lock.acquire(False):
+                # print('Taking batches from batch_queue {}'.format(i))
+                bts = [bt for bt in batch_queue]
+                del batch_queue[:]
+                # while len(batch_queue) > 0:
+                #     bts.append(batch_queue.pop(0))
+                # print('Got {} batches from batch_queue {}.'.format(len(bts), i))
+                lock.release()
+                for bt in bts:
+                    if type(bt) != type('end'):
+                        yield bt
+                    else:
+                        n += 1
+                        print('Got {} ends!!!!! {}'.format(n, utils.print_time()))
+            else:
+                empty += 1
+        if empty == n_cores:
+            # print('All empty or unavailable.')
+            time.sleep(10)
+    # print('End iter.')
+
+
+
+    # n = 0
+    # while n < num:
+    #     if len(batch_queue) == 0:
+    #         time.sleep(10)
+    #         continue
+    #     bts = []
+    #     lock.acquire()
+    #     print('Taking batches...')
+    #     while len(batch_queue) > 0:
+    #         bts.append(batch_queue.pop(0))
+    #     print('Got {} batches from batch_queue.'.format(len(bts)))
+    #     lock.release()
+    #     for bt in bts:
+    #         if type(bt) != type('end'):
+    #             yield bt
+    #         else:
+    #             print('Got one end!')
+    #             n += 1
+    # print('End iter.')
+
+
+
+    # for i in range(num):
+    #     print('iter of {}'.format(i))
+    #     sleep_time = 0
+    #     while len(batch_queue) == 0:
+    #         tt = 10
+    #         time.sleep(tt)
+    #         sleep_time += tt
+    #         print('sleeping {} seconds.'.format(sleep_time))
+    #     bts = []
+    #     lock.acquire()
+    #     while True:
+    #         bts.append(batch_queue.pop(0))
+    #         # lock.release()
+    #         if type(bt) != type('end'):
+    #             yield bt
+    #         else:
+    #             print('iter end one fp! {}'.format(utils.print_time()))
+    #             name = multiprocessing.current_process().name
+    #             print('{} current queue size: {}'.format(name, len(batch_queue)))
+    #             break
+
+
+
+def main(stdfeat, num_epochs=300, param_file=None, 
+         model_file=None, testing_type='8k', model='jy',
+         frame_level='', continue_train=False, delta=False,
+         gaussian=True, scales=3):
+    # Load the dataset
+    print("Loading data...")
+    test_only = ( model_file and os.path.isfile(model_file) )
+    # train_batches, val_batches, test_batches = load_dataset(training_type, testing_type, 
+    #                                             fold, augment, delta, test_only, model_file)
+    # print('train batches: {}'.format(len(train_batches)))
+    # print('val batches: {}'.format(len(val_batches)))
+    # print('test batches: {}'.format(len(test_batches)))
+
+    # for bats, idx in my_iterator(train_batches, 100):
+    #     np.save('var/stdfeat/train_'+str(idx), bats)
+    # for bats, idx in my_iterator(val_batches, 100):
+    #     np.save('var/stdfeat/val_'+str(idx), bats)
+    # for bats, idx in my_iterator(test_batches, 100):
+    #     np.save('var/stdfeat/test_'+str(idx), bats)
+
+    # return
+    test_batches = get_test_batches(stdfeat)
+    
+    # build networks and functions
+    train_fn, val_fn, network = init_process(model, scales, gaussian, delta)
+    
+
     if not test_only or continue_train:
         if continue_train and os.path.isfile(model_file):
             print('Continue training {}'.format(model_file))
@@ -250,51 +521,89 @@ def main(stdfeat, num_epochs=300, param_file=None,
                     else '.temp_err_{}'.format(os.path.basename(model_file))
         temp_acc_filename = '.temp_acc_model_{}.npy'.format(int(time.time()*100000)) if model_file == None \
                     else '.temp_acc_{}'.format(os.path.basename(model_file))
+        
+        n_cores = 3
+        qlts = []
+        for i in range(n_cores):
+            mgr = Manager()
+            qlts.append((mgr.list(), mgr.Lock(), i))
+        # pool = Pool(processes=n_cores)
+        # train_queue, val_queue = mgr.list(), mgr.list()
+        # train_queue, val_queue = Queue(2000), Queue(1000)
+        # tr_fp_list = get_fp_list(stdfeat, num_epochs, True)
+        # tr_fp_list = get_fp_list('train', stdfeat, num_epochs, True)
+        # va_fp_list = get_fp_list('val', stdfeat, num_epochs, True)
+        # load_data_proc = Process(target=th_loadfile, args=(train_queue, tr_fp_list), 
+        #                           name='tr_loadfile')
+        # load_train_proc = Process(target=th_loadfile, args=(train_queue, tr_fp_list), 
+        #                           name='tr_loadfile')
+        # load_val_proc = Process(target=th_loadfile, args=(val_queue, va_fp_list), 
+        #                         name='va_loadfile')
+        # load_data_proc.start()
+        # load_train_proc.start()
+        # load_val_proc.start()
+        tr_num = get_data_num('train', stdfeat)
+        va_num = get_data_num('val', stdfeat)
         for epoch in range(num_epochs):
+            start_time = time.time()
             # np.random.shuffle(train_batches)
             train_err = 0
-            start_time = time.time()
-            
-            tr_num = get_data_num('train', stdfeat)
             no_tr = 0
-            for train_batches in iter_data('train', tr_num, stdfeat):
-                np.random.shuffle(train_batches)
-                for batch in train_batches:
-                    inputs, targets, names = zip(*batch)
-                    inputs = [np.array(zip(*inputs)[x]) for x in range(n_sources)]
-                    if inputs[0].shape[2] > 200000:
-                        continue
-                    targets = np.array(targets, dtype=np.int32)
-                    inputs.append(targets)
+            # pool.map_async(pool_loadfile, gen_pool_fp_list('train', stdfeat, qlts, True))
+            proc_list = gen_procs(qlts, generate_fp_list('train', stdfeat, True))
+            for batch in new_iter_batch(qlts, tr_num):
+            # for batch in iter_batch(train_queue, 'train', tr_num):
+                inputs, targets, names = zip(*batch)
+                inputs = [np.array(zip(*inputs)[x]) for x in range(scales)]
+                if inputs[0].shape[2] > 200000:
+                    continue
+                targets = np.array(targets, dtype=np.int32)
+                inputs.append(targets)
+                try:
                     err, pred, g_pred, pg_pred = train_fn(*inputs)
-                    train_err += err
-                    no_tr += 1
+                except: 
+                    continue
+                train_err += err*len(batch)
+                no_tr += len(batch)
+                del batch
+            # print('Join all procs.')
+            for proc in proc_list:
+                proc.join()
             print('Total number of training data: {}'.format(no_tr))
+
 
             val_err = 0
             val_acc = 0
             out_list, tar_list = [], []
             result_map = np.zeros((10,10), dtype=np.int32)
-            va_num = get_data_num('val', stdfeat)
             no_va = 0
-            v_ = [[],[],[],[],[]]
-            for val_batches in iter_data('val', va_num, stdfeat):
-                for batch in val_batches:
-                    inputs, targets, names = zip(*batch)
-                    inputs = [np.array(zip(*inputs)[x]) for x in range(n_sources)]
-                    if inputs[0].shape[2] > 200000:
-                        continue
-                    targets = np.array(targets, dtype=np.int32)
-                    inputs.append(targets)
+            # pool.map_async(pool_loadfile, gen_pool_fp_list('val', stdfeat, qlts, False))
+            proc_list = gen_procs(qlts, generate_fp_list('val', stdfeat, True))
+            for batch in new_iter_batch(qlts, va_num):
+            # for batch in iter_batch(train_queue, 'val', va_num):
+            # for batch in iter_batch(val_queue, 'val', va_num):
+                inputs, targets, names = zip(*batch)
+                inputs = [np.array(zip(*inputs)[x]) for x in range(scales)]
+                if inputs[0].shape[2] > 200000:
+                    continue
+                targets = np.array(targets, dtype=np.int32)
+                inputs.append(targets)
+                try:
                     err, acc, pred, pred_prob, g_pred, pg_pred  = val_fn(*inputs)
-                    # print('out:\n {}'.format(out))
-                    # print('targets:\n {}'.format(targets))
-                    val_err += err
-                    val_acc += acc
-                    no_va += 1
-                    # print((err, acc, pred_prob))
-                    for i, j in zip(targets, pred):
-                        result_map[i.argmax()][j] += 1
+                except:
+                    continue
+                # print('out:\n {}'.format(out))
+                # print('targets:\n {}'.format(targets))
+                val_err += err*len(batch)
+                val_acc += acc*len(batch)
+                no_va += len(batch)
+                # print((err, acc, pred_prob))
+                for i, j in zip(targets, pred):
+                    result_map[i.argmax()][j] += 1
+                del batch
+            # print('Join all procs.')
+            for proc in proc_list:
+                proc.join()
             print('Total number of validation data: {}'.format(no_va))
 
             # Print the results for this epoch:
@@ -318,7 +627,12 @@ def main(stdfeat, num_epochs=300, param_file=None,
                 np.save(temp_acc_filename, final_acc_param)
 
             if epoch%25 == 24:
-                run_test(test_batches, val_fn, n_sources, testing_type, frame_level, print_prob=True)
+                run_test(test_batches, val_fn, scales, testing_type, frame_level, print_prob=True)
+
+        # load_train_proc.join()
+        # load_val_proc.join()
+        # pool.close()
+        # pool.join()
 
         if model_file:
             np.save('model/final/' + model_file, lasagne.layers.get_all_param_values(network))
@@ -333,20 +647,23 @@ def main(stdfeat, num_epochs=300, param_file=None,
         val = np.load(model_file)
         lasagne.layers.set_all_param_values(network, val)
 
-    run_test(test_batches, val_fn, n_sources, testing_type, frame_level)
+    run_test(test_batches, val_fn, scales, testing_type, frame_level)
 
 
-def run_test(test_batches, test_fn, n_sources, testing_type, frame_level='', print_prob=False):
+def run_test(test_batches, test_fn, scales, testing_type, frame_level='', print_prob=False):
     result_map = np.zeros((10,10), dtype=np.int32)
     test_err = 0
     test_acc = 0
     res_list = []
     for batch in test_batches:
         inputs, targets, names = zip(*batch)
-        inputs = [np.array(zip(*inputs)[x]) for x in range(n_sources)]
+        inputs = [np.array(zip(*inputs)[x]) for x in range(scales)]
         targets = np.array(targets, dtype=np.int32)
         inputs.append(targets)
-        err, acc, pred, pred_prob, g_pred, pg_pred = test_fn(*inputs)
+        try:
+            err, acc, pred, pred_prob, g_pred, pg_pred = test_fn(*inputs)
+        except:
+            continue
         test_err += err
         test_acc += acc
         for i, j in zip(targets, pred):
@@ -394,9 +711,6 @@ def parser():
     p.add_argument('-t', '--testing', type=str, metavar='testing_type',
                     help='Testing type')
     
-    p.add_argument('-r', '--rd', action='store_true', default=False,
-                    help='Show result data')
-    
     p.add_argument('-e', '--epoch', type=int, 
                     help='Number of epochs')
     
@@ -427,6 +741,10 @@ def parser():
     p.add_argument('-d', '--delta', action='store_true', default=False,
                     help='account delta as feature')
 
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("-j", "--jycnn", action="store_true")
+    group.add_argument("-r", "--fcrnn", action="store_true")
+
 
     args = p.parse_args()
     return args
@@ -440,7 +758,6 @@ if __name__ == '__main__':
     kwargs = {}
     args = parser()
     kwargs['stdfeat'] = args.stdfeat
-    kwargs['show_result'] = args.rd
     kwargs['model_file'] = args.model
     kwargs['num_epochs'] = args.epoch
     # kwargs['training_type'] = args.training
@@ -452,6 +769,13 @@ if __name__ == '__main__':
     kwargs['gaussian'] = args.gaussian
     # kwargs['scales'] = args.scales
     kwargs['delta'] = args.delta
+    if args.jycnn:
+        kwargs['model'] = 'jy'
+    elif args.fcrnn:
+        kwargs['model'] = 'fcrnn'
+    else:
+        print('Default select to jycnn.')
+        kwargs['model'] = 'jy'
 
     if args.scales not in [1, 2, 3]:
         print('Number of scales should be 1, 2, or 3. Default to 3.')

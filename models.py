@@ -231,6 +231,91 @@ def fcn_gaussian_multiscale(
     # print(layers.get_output_shape(network))
     return network
 
+def fcrnn(
+        input_var_list,
+        early_conv_dict_list,
+        late_conv_dict,
+        dense_filter_size,
+        final_pool_function=T.max,
+        input_size_list=[128], output_size=10,
+        last_late_conv_size=128,
+        p_dropout=0.5, 
+        num_feat_type = 1,
+        num_lstm_unit = 512,
+        gradient_steps = 10
+        ):
+    assert(len(early_conv_dict_list) == len(input_var_list) ==
+           len(input_size_list))
+
+    # early conv layers
+    conv_network_list = list()
+    total_stride_list = list()
+    for jj, [early_conv_dict, input_var, input_size] in enumerate(zip(
+            early_conv_dict_list, input_var_list, input_size_list)):
+        input_network = lasagne.layers.InputLayer(
+            shape=(None, num_feat_type, None, input_size), input_var=input_var)
+
+        total_stride = 1
+        network, total_stride = conv_layers(input_network, early_conv_dict,
+                                            total_stride,
+                                            init_input_size=input_size,
+                                            p_dropout=0,
+                                            base_name='early{}'.format(jj))
+        total_stride_list.append(total_stride)
+        conv_network_list.append(network)
+
+    '''
+    # upsampling
+    conv_network_list = [cl.LocalExtend(net, axis=2, extend_size=ts)
+                         for net, ts in zip(conv_network_list,
+                                            total_stride_list)]
+    '''
+    network = layers.ConcatLayer(conv_network_list,
+                                 axis=1,
+                                 cropping=[None, None, 'lower', None],
+                                 name='MultisourceConcatenate')
+
+    # late conv layers (dense layers)
+    network, total_stride = conv_layers(network, late_conv_dict,
+                                        total_stride,
+                                        init_input_size=1,
+                                        p_dropout=p_dropout,
+                                        base_name='late')
+
+    # frame output layer. every frame has a value
+    network = cl.Conv2DXLayer(
+        lasagne.layers.dropout(network, p=p_dropout),
+        num_filters=last_late_conv_size, filter_size=(dense_filter_size, 1),
+        nonlinearity=lasagne.nonlinearities.sigmoid,
+        W=lasagne.init.GlorotUniform()
+    )
+    network = layers.ReshapeLayer(network, ([0], [1], -1))
+    network = layers.DimshuffleLayer(network, (0, 2, 1))
+
+    # lstm layers
+    l_forward = layers.LSTMLayer(network, output_size,
+                                        grad_clipping=100,
+                                        gradient_steps=10,
+                                        nonlinearity=lasagne.nonlinearities.sigmoid)
+
+    # l_backward = layers.LSTMLayer(l_forward, output_size,
+    #                                     grad_clipping=100,
+    #                                     gradient_steps=gradient_steps,
+    #                                     nonlinearity=lasagne.nonlinearities.sigmoid,
+    #                                     backwards=True)
+
+    network = layers.DimshuffleLayer(l_forward, (0, 2, 1))
+
+    # pool
+    network = layers.GlobalPoolLayer(network,
+                                     pool_function=final_pool_function)
+    network = layers.ReshapeLayer(network, ([0], -1))
+
+    return network
+
+
+
+
 def fcn_multiscale(
         input_var_list,
         early_conv_dict_list,

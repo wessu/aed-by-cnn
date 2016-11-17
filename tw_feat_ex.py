@@ -129,7 +129,7 @@ def isAudioFile(fn, dataset):
 		return not (fn.endswith('.csv') or 
 					fn.endswith('.json') or 
 					fn.startswith('.'))
-	return True
+	return target_number
 
 def initProcess(ds, af, l, s, w, h, n, ag):
 	global dataset

@@ -10,8 +10,10 @@ import threading
 US_Dict_filepath = 'data/feature/US_Dict'
 EK_Dict_filepath = 'data/feature/8K_Dict'
 TW_Dict_filepath = 'data/feature/TW_Dict'
+TW2_Dict_filepath = 'data/feature/TW2_Dict'
 global delta
 global augment
+global batch_size
 
 ##### UTILITY FUNCTIONS #####
 def getDictDir(dict_type):
@@ -19,6 +21,8 @@ def getDictDir(dict_type):
         return US_Dict_filepath
     elif dict_type == 'tw':
         return TW_Dict_filepath
+    elif dict_type == 'tw2':
+        return TW2_Dict_filepath
     else:
         return EK_Dict_filepath
 
@@ -29,10 +33,10 @@ def add_feature(data_list, ft_dict, name):
             ft = ([np.delete(k, 1, 0) for k in ft[0]], ft[1], ft[2])
         data_list.append(ft)
 
-def load_files(data_dir, fn_list):
+def load_files(fp_list):
     data_list = []
-    for fn, fl_type in fn_list:
-        ft_dict = np.load(os.path.join(data_dir, fn+'.npy')).item()
+    for fp, fl_type in fp_list:
+        ft_dict = np.load(fp).item()
         add_feature(data_list, ft_dict, fl_type)
     return data_list
 
@@ -73,14 +77,22 @@ class myThread(threading.Thread):
         self.fl_list = fl_list
         self.sc_list = sc_list
         self.save_dir = save_dir
+        self.fixed_length = (self.load_dir == TW2_Dict_filepath)
+
     def run(self):
         printMsg("Starting " + self.name) 
         num_fl = 0
         args_list = []
-        for fn_list, idx in my_iterator(self.fl_list, 500):
-            args_list.append((fn_list, idx, self.load_dir, 
-                         self.sc_list, self.save_dir, self.name))
-            num_fl += len(fn_list)
+        if self.fixed_length:
+            for fp_list, idx in iter_length(self.fl_list, self.load_dir):
+                args_list.append((fp_list, idx, self.sc_list, self.save_dir, 
+                                    self.name, self.fixed_length))
+                num_fl += len(fp_list)
+        else:
+            for fp_list, idx in my_iterator(self.fl_list, 500):
+                args_list.append((fp_list, idx, self.sc_list, self.save_dir, 
+                                    self.name, self.fixed_length))
+                num_fl += len(fp_list)
         printMsg('{} data: {}'.format(self.name, num_fl))
         std_by_multiprocessing(args_list)
 
@@ -94,13 +106,25 @@ def std_by_multiprocessing(args_list):
     pool.join()
 
 def standardize_list(args):
-    fn_list, idx, load_dir, sc_list, save_dir, name = args
-    data_list = load_files(load_dir, fn_list)
+    fp_list, idx, sc_list, save_dir, name, fixed_length = args
+    data_list = load_files(fp_list)
     standardize(sc_list, data_list)
-    ft_batches = np.asarray([data_list[i:i+1] for i in range(0, len(data_list), 1)])
+    bsize = batch_size if fixed_length else 1
+    ft_batches = np.asarray([data_list[i:i+bsize] for i in range(0, len(data_list), bsize)])
     save_fp = os.path.join(save_dir, name+'_'+str(idx)+'.npy')
     np.save(save_fp, ft_batches)
     printMsg('{} finished.'.format(name))
+
+def iter_length(dt_list, dt_dir):
+    for idx, l in enumerate(os.listdir(dt_dir)):
+        dts = []
+        fn_list = os.listdir(os.path.join(dt_dir, l))
+        for dt in dt_list:
+            fl = os.path.basename(dt[0])
+            if fl in fn_list:
+                dts.append(dt)
+        print('{} files from {}.'.format(len(dts), l))
+        yield dts, idx
 
 
 ##### MAIN FUNCTION #####
@@ -122,7 +146,7 @@ def load_dataset(training_type, testing_type, test_fold, scalers_file):
             test_file_set.add(fid)
 
     if test_only:
-        save_dir = 'var/stdfeat/' + os.path.basename(scalers_file).split('.')[0]
+        save_dir = 'var/stdfeat/' + os.path.basename(scalers_file).replace('scaler_', '').split('.')[0]
     elif scalers_file != None:
         save_dir = 'var/stdfeat/' + scalers_file
     else:
@@ -136,26 +160,27 @@ def load_dataset(training_type, testing_type, test_fold, scalers_file):
     if test_only:
         # load scalers to standardize testing files
         print('Loading testing files only')
-        sc_fp = 'model/scalers/scaler_' + os.path.basename(scalers_file)
-        sc_list = np.load(sc_fp).tolist()
+        sc_list = np.load(scalers_file).tolist()
     else:
         # select training and validation files
         tmp_tv_list = []
-        for fn in os.listdir(train_dir):
-            fn = os.path.splitext(fn)[0]
-            if fn not in test_file_set:
-                tmp_tv_list.append(fn)
+        for root, dirs, files in os.walk(train_dir):
+            for fl in files:
+                fn = os.path.splitext(fl)[0]
+                if fn not in test_file_set:
+                    tmp_tv_list.append(os.path.join(root, fl))
+
         
         np.random.shuffle(tmp_tv_list)
         tv_list = []
         if augment:
-            for fn in tmp_tv_list:
-                tv_list.append((fn, 'origin'))
-                tv_list.append((fn, '5db'))
-                tv_list.append((fn, '-5db'))
+            for fp in tmp_tv_list:
+                tv_list.append((fp, 'origin'))
+                tv_list.append((fp, '5db'))
+                tv_list.append((fp, '-5db'))
         else:
-            for fn in tmp_tv_list:
-                tv_list.append((fn, 'origin'))
+            for fp in tmp_tv_list:
+                tv_list.append((fp, 'origin'))
         print('Totally {} files for training and validation.'.format(len(tv_list)))
 
         np.random.shuffle(tv_list)
@@ -166,8 +191,8 @@ def load_dataset(training_type, testing_type, test_fold, scalers_file):
 
         # create scalers
         sc_list = []
-        for fn_list, idx in my_iterator(tr_list, 1000):
-            data_list = load_files(train_dir, fn_list)
+        for fp_list, idx in my_iterator(tr_list, 1000):
+            data_list = load_files(fp_list)
             fit_scaler(sc_list, data_list)
             print('{} files to the scalers.'.format(len(data_list)))
 
@@ -181,7 +206,8 @@ def load_dataset(training_type, testing_type, test_fold, scalers_file):
 
         if scalers_file != None:
             np.save('model/scalers/scaler_' + scalers_file, sc_list)
-        
+            np.save('model/tv_list/list_' + scalers_file, [tr_list, va_list])
+
         # num_tr = 0
         # for fn_list, idx in my_iterator(tr_list, 500):
         #     data_list = load_files(train_dir, fn_list)
@@ -202,10 +228,11 @@ def load_dataset(training_type, testing_type, test_fold, scalers_file):
 
     # standardize testing and save them
     te_list = []
-    for fn in os.listdir(test_dir):
-        fn = os.path.splitext(fn)[0]
-        if fn in test_file_set:
-            te_list.append((fn, 'origin'))
+    for root, dirs, files in os.walk(test_dir):
+        for fl in files:
+            fn = os.path.splitext(fl)[0]
+            if fn in test_file_set:
+                te_list.append((os.path.join(root, fl), 'origin'))
 
     te_thread = myThread("test", test_dir, te_list, sc_list, save_dir)
     te_thread.start()
@@ -232,8 +259,8 @@ def parser():
     # p.add_argument('-r', '--rd', action='store_true', default=False,
     #                 help='Show result data')
     
-    # p.add_argument('-e', '--epoch', type=int, 
-    #                 help='Number of epochs')
+    p.add_argument('-b', '--batch_size', type=int, 
+                    help='Batch size')
     
     # p.add_argument('-s', '--scales', type=int, default=3,
     #                 help='Number of scales (1, 2, or 3)')
@@ -281,11 +308,13 @@ if __name__ == '__main__':
     
     augment = args.augment
     delta = args.delta
+    batch_size = args.batch_size if args.training == 'tw2' else 1
 
     print('training data: {}'.format(kwargs['training_type']))
     print('testing data: {}'.format(kwargs['testing_type']))
     print('scalers file: {}'.format(kwargs['scalers_file']))
     print('test fold: {}'.format(kwargs['test_fold']))
+    print('batch size: {}'.format(batch_size))
 
     load_dataset(**kwargs)
     

@@ -2,6 +2,7 @@ import json
 import csv
 import numpy as np
 import os
+import time
 
 # Upscale array
 def shift(array_list, shift_size, axis):
@@ -109,3 +110,5 @@ def my_iterator(inputs, bsize):
         sl = slice(idx*bsize, (idx+1)*bsize)
         yield (inputs[sl], idx)
 
+def print_time():
+    return time.asctime(time.localtime(time.time()))

@@ -1096,3 +1096,8 @@ class FixedGaussianScan1DLayer(layers.Layer):
         activation = conved
 
         return self.nonlinearity(activation)
+
+
+
+
+
