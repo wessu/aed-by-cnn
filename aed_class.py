@@ -19,13 +19,18 @@ from sklearn import preprocessing as pp
 import models
 import signal
 import threading
+from threading import Thread
 import multiprocessing
 from multiprocessing import Process, Queue, Manager, Lock, Pool
+import collections
+import gc
 
 import functions 
 
 # import theano.sandbox.cuda
 # theano.sandbox.cuda.use('gpu3')
+
+global scales
 
 def parse_params(pdict):
     def change_param(key):
@@ -232,9 +237,9 @@ def iter_batch(batch_queue, data_type, num):
 def th_loadfile(batch_queue, fp_list):
     name = multiprocessing.current_process().name
     for fp in fp_list:
-        while len(batch_queue) > 500:
+        while len(batch_queue) > 100:
         # while batch_queue.full():
-            time.sleep(60)
+            time.sleep(5)
             # print('{} sleep for 60 seconds.'.format(name))
         bts = np.load(fp)
         # print('{} originally has {} batches.'.format(fp, len(bts)))
@@ -255,17 +260,20 @@ def th_loadfile(batch_queue, fp_list):
 
 def get_test_batches(stdfeat):
     te_num = get_data_num('test', stdfeat)
-    test_batches = []
+    bts, test_batches = [], []
     for n in range(te_num):
         fn = 'test_' + str(n) + '.npy'
         fp = os.path.join('var/stdfeat', stdfeat, fn)
-        if len(test_batches) == 0:
-            test_batches = np.load(fp)
+        if len(bts) == 0:
+            bts = np.load(fp)
         else:
-            test_batches = np.append(test_batches, np.load(fp), axis=0)
+            bts = np.append(bts, np.load(fp), axis=0)
+    for bt in bts:
+        test_batches.append(reshape_batch(bt))
+
     return test_batches
 
-def init_process(model, scales, gaussian, delta):
+def init_process(model, gaussian, delta):
     print("Building model and compiling functions...")
     # Prepare Theano variables for inputs and targets
     input_var_list = [T.tensor4('inputs{}'.format(i))
@@ -348,26 +356,34 @@ def proc_loadfile(batch_queue, lock, idx, fp_list):
 def pool_loadfile(args):
     batch_queue, lock, i, fp = args
     # name = multiprocessing.current_process().name
-    while len(batch_queue) > 200:
-        time.sleep(60)
+    while len(batch_queue) > 120:
+        time.sleep(5)
         # print('{} sleep for 60 seconds.'.format(name))
     fn = os.path.basename(fp)
     # print('Load {} to {}.'.format(fn, i))
+    st = time.time()
     bts = np.load(fp)
     bts = chop_batches(bts, 5)
     np.random.shuffle(bts)
     lock.acquire()
     # print('{} got the lock {}.'.format(fn, i))
-    k = 0
     for bt in bts:
+        bt = reshape_batch(bt)
         batch_queue.append(bt)
-        k+=1
-        # print('{}: {}/{}'.format(fn, k, len(bts)))
     batch_queue.append('end')
     # print('Pool finished {}. {}'.format(fn, utils.print_time()))
-    # print('Pool current queue size: {}'.format(len(batch_queue)))
+    # print('Queue {} size: {}.'.format(i, len(batch_queue)))
+    print('[Queue {}] costed {} secs to manage {}. ({} batches)'.format(i, time.time()-st, fn, len(bts)))
+    del bts
     # print('{} releasing the lock {}.'.format(fn, i))
     lock.release()
+
+def reshape_batch(batch):
+    inputs, targets, names = zip(*batch)
+    tmp_in = zip(*inputs)
+    inputs = [np.array(tmp_in[x]) for x in range(scales)]
+    targets = np.array(targets, dtype=np.int32)
+    return (inputs, targets, names)
 
 def generate_fp_list(data_type, stdfeat, shuffle=False):
     fp_list = []
@@ -396,7 +412,9 @@ def gen_procs(qlts, fp_list):
         queue, lock, idx = qlts[i] 
         fpl = fp_list[i::n_cores]
         name = 'loadfile_proc_'+str(i)
-        proc = Process(target=proc_loadfile, args=(queue, lock, idx, fpl),
+        # proc = Process(target=proc_loadfile, args=(queue, lock, idx, fpl),
+        #                 name=name)
+        proc = Thread(target=proc_loadfile, args=(queue, lock, idx, fpl),
                         name=name)
         proc.start()
         proc_list.append(proc)
@@ -415,23 +433,41 @@ def new_iter_batch(qlts, num):
                 continue
             if lock.acquire(False):
                 # print('Taking batches from batch_queue {}'.format(i))
-                bts = [bt for bt in batch_queue]
-                del batch_queue[:]
-                # while len(batch_queue) > 0:
-                #     bts.append(batch_queue.pop(0))
-                # print('Got {} batches from batch_queue {}.'.format(len(bts), i))
+                # bts = [bt for bt in batch_queue]
+                # batch_queue.clear()
+                # del batch_queue[:]
+                bts = []
+                while len(batch_queue) > 0:
+                    bts.append(batch_queue.popleft())
+                print('[Main th] Got {} batches from Queue {}. {}'.format(len(bts), i, utils.print_time()))
                 lock.release()
+
+                lg = 0
+                st = time.time()
+                n_elem = 0
                 for bt in bts:
                     if type(bt) != type('end'):
+                        lg = bt[0][0][0].shape[1]
+                        # ti = time.time()
+                        # print('GO TRAIN {}!'.format(lg))
                         yield bt
+                        # print('END TRAIN {}! {}'.format(lg, time.time()-ti))
+                        n_elem += 1
                     else:
                         n += 1
-                        print('Got {} ends!!!!! {}'.format(n, utils.print_time()))
+                        print('[Main th] Finished {}: {}*{}. {}'.format(n, lg, n_elem, time.time()-st))
+                        n_elem = 0
+                        st = time.time()
+                        sys.stdout.flush()
+                del bts[:]
+                ng = gc.collect()
+                # print('{} garbages.'.format(ng))
+                del gc.garbage[:]
             else:
                 empty += 1
         if empty == n_cores:
             # print('All empty or unavailable.')
-            time.sleep(10)
+            time.sleep(2)
     # print('End iter.')
 
 
@@ -479,12 +515,49 @@ def new_iter_batch(qlts, num):
     #             print('{} current queue size: {}'.format(name, len(batch_queue)))
     #             break
 
+def train_a_batch(batch, train_fn):
+    # ti = time.time()
+    inputs, targets, names = batch
+    if inputs[0].shape[2] > 200000:
+        return None, None, None, None
+    inputs.append(targets)
+    try:
+        # print('start running yo!', time.time()-ti)
+        err, pred, g_pred, pg_pred = train_fn(*inputs)
+        # print('end running yo!', time.time()-ti)
+        return err, pred, g_pred, pg_pred
+    except: 
+        return None, None, None, None
+
+def val_a_batch(batch, val_fn):
+    inputs, targets, names = batch
+    if inputs[0].shape[2] > 200000:
+        return None, None, None, None, None, None, None
+    inputs.append(targets)
+    try:
+        err, acc, pred, pred_prob, g_pred, pg_pred = val_fn(*inputs)
+        return err, acc, pred, pred_prob, g_pred, pg_pred, targets
+    except:
+        return None, None, None, None, None, None, None
+
+def test_a_batch(batch, test_fn):
+    inputs, targets, names = batch
+    if inputs[0].shape[2] > 200000:
+        return None, None, None, None, None, None, None
+    inputs.append(targets)
+    try:
+        err, acc, pred, pred_prob, g_pred, pg_pred = test_fn(*inputs)
+        return err, acc, pred, pred_prob, g_pred, pg_pred, targets
+    except:
+        return None, None, None, None, None, None, None
 
 
 def main(stdfeat, num_epochs=300, param_file=None, 
          model_file=None, testing_type='8k', model='jy',
          frame_level='', continue_train=False, delta=False,
-         gaussian=True, scales=3):
+         gaussian=True):
+    # gc.disable()
+
     # Load the dataset
     print("Loading data...")
     test_only = ( model_file and os.path.isfile(model_file) )
@@ -505,7 +578,7 @@ def main(stdfeat, num_epochs=300, param_file=None,
     test_batches = get_test_batches(stdfeat)
     
     # build networks and functions
-    train_fn, val_fn, network = init_process(model, scales, gaussian, delta)
+    train_fn, val_fn, network = init_process(model, gaussian, delta)
     
 
     if not test_only or continue_train:
@@ -525,8 +598,8 @@ def main(stdfeat, num_epochs=300, param_file=None,
         n_cores = 3
         qlts = []
         for i in range(n_cores):
-            mgr = Manager()
-            qlts.append((mgr.list(), mgr.Lock(), i))
+            # mgr = Manager()
+            qlts.append((collections.deque(), threading.Lock(), i))
         # pool = Pool(processes=n_cores)
         # train_queue, val_queue = mgr.list(), mgr.list()
         # train_queue, val_queue = Queue(2000), Queue(1000)
@@ -544,7 +617,9 @@ def main(stdfeat, num_epochs=300, param_file=None,
         # load_val_proc.start()
         tr_num = get_data_num('train', stdfeat)
         va_num = get_data_num('val', stdfeat)
-        for epoch in range(num_epochs):
+        sys.stdout.flush()
+        for epoch in xrange(num_epochs):
+            print('epoch {}. {}'.format(epoch, utils.print_time()))
             start_time = time.time()
             # np.random.shuffle(train_batches)
             train_err = 0
@@ -553,19 +628,10 @@ def main(stdfeat, num_epochs=300, param_file=None,
             proc_list = gen_procs(qlts, generate_fp_list('train', stdfeat, True))
             for batch in new_iter_batch(qlts, tr_num):
             # for batch in iter_batch(train_queue, 'train', tr_num):
-                inputs, targets, names = zip(*batch)
-                inputs = [np.array(zip(*inputs)[x]) for x in range(scales)]
-                if inputs[0].shape[2] > 200000:
-                    continue
-                targets = np.array(targets, dtype=np.int32)
-                inputs.append(targets)
-                try:
-                    err, pred, g_pred, pg_pred = train_fn(*inputs)
-                except: 
-                    continue
-                train_err += err*len(batch)
-                no_tr += len(batch)
-                del batch
+                err, pred, g_pred, pg_pred = train_a_batch(batch, train_fn)
+                if err != None:
+                    train_err += err*len(pred)
+                    no_tr += len(pred)
             # print('Join all procs.')
             for proc in proc_list:
                 proc.join()
@@ -582,25 +648,16 @@ def main(stdfeat, num_epochs=300, param_file=None,
             for batch in new_iter_batch(qlts, va_num):
             # for batch in iter_batch(train_queue, 'val', va_num):
             # for batch in iter_batch(val_queue, 'val', va_num):
-                inputs, targets, names = zip(*batch)
-                inputs = [np.array(zip(*inputs)[x]) for x in range(scales)]
-                if inputs[0].shape[2] > 200000:
-                    continue
-                targets = np.array(targets, dtype=np.int32)
-                inputs.append(targets)
-                try:
-                    err, acc, pred, pred_prob, g_pred, pg_pred  = val_fn(*inputs)
-                except:
-                    continue
+                err, acc, pred, pred_prob, g_pred, pg_pred, targets = val_a_batch(batch, val_fn)
                 # print('out:\n {}'.format(out))
                 # print('targets:\n {}'.format(targets))
-                val_err += err*len(batch)
-                val_acc += acc*len(batch)
-                no_va += len(batch)
-                # print((err, acc, pred_prob))
-                for i, j in zip(targets, pred):
-                    result_map[i.argmax()][j] += 1
-                del batch
+                if err != None:
+                    val_err += err*len(pred)
+                    val_acc += acc*len(pred)
+                    no_va += len(pred)
+                    # print((err, acc, pred_prob))
+                    for i, j in zip(targets, pred):
+                        result_map[i.argmax()][j] += 1
             # print('Join all procs.')
             for proc in proc_list:
                 proc.join()
@@ -627,7 +684,9 @@ def main(stdfeat, num_epochs=300, param_file=None,
                 np.save(temp_acc_filename, final_acc_param)
 
             if epoch%25 == 24:
-                run_test(test_batches, val_fn, scales, testing_type, frame_level, print_prob=True)
+                run_test(test_batches, val_fn, testing_type, frame_level, print_prob=True)
+
+            sys.stdout.flush()
 
         # load_train_proc.join()
         # load_val_proc.join()
@@ -647,25 +706,21 @@ def main(stdfeat, num_epochs=300, param_file=None,
         val = np.load(model_file)
         lasagne.layers.set_all_param_values(network, val)
 
-    run_test(test_batches, val_fn, scales, testing_type, frame_level)
+    run_test(test_batches, val_fn, testing_type, frame_level)
+    # gc.enable()
 
 
-def run_test(test_batches, test_fn, scales, testing_type, frame_level='', print_prob=False):
+def run_test(test_batches, test_fn, testing_type, frame_level='', print_prob=False):
     result_map = np.zeros((10,10), dtype=np.int32)
     test_err = 0
     test_acc = 0
+    num_te = 0
     res_list = []
     for batch in test_batches:
-        inputs, targets, names = zip(*batch)
-        inputs = [np.array(zip(*inputs)[x]) for x in range(scales)]
-        targets = np.array(targets, dtype=np.int32)
-        inputs.append(targets)
-        try:
-            err, acc, pred, pred_prob, g_pred, pg_pred = test_fn(*inputs)
-        except:
-            continue
-        test_err += err
-        test_acc += acc
+        err, acc, pred, pred_prob, g_pred, pg_pred, targets = test_a_batch(batch, test_fn)
+        test_err += err*len(pred)
+        test_acc += acc*len(pred)
+        num_te += len(pred)
         for i, j in zip(targets, pred):
             result_map[i.argmax()][j] += 1
         if print_prob and random.randint(0, 19) == 0:
@@ -694,9 +749,9 @@ def run_test(test_batches, test_fn, scales, testing_type, frame_level='', print_
         np.save(os.path.join(res_dir, 'final.npy'), res_list)
                 
     print("Final results:")
-    print("  test loss:\t\t\t{:.6f}".format(test_err / len(test_batches)))
+    print("  test loss:\t\t\t{:.6f}".format(test_err / num_te))
     print("  test accuracy:\t\t{:.2f} %".format(
-        test_acc / len(test_batches) * 100))
+        test_acc / num_te * 100))
     print("Result map: (x: prediction, y: target)")
     print(result_map)
 
@@ -778,7 +833,10 @@ if __name__ == '__main__':
         kwargs['model'] = 'jy'
 
     if args.scales not in [1, 2, 3]:
+        scales = 3
         print('Number of scales should be 1, 2, or 3. Default to 3.')
+    else:
+        scales = args.scales
         
 
     print('testing data: {}'.format(kwargs['testing_type']))

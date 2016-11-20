@@ -1,54 +1,37 @@
-from multiprocessing import Lock
-from multiprocessing import Manager
-from multiprocessing import Pool
-def testfunc(a):
-	print(a)
-def test1(num):
-	def test2(num):
-		pool = Pool(processes=5)
-		pool.map(testfunc, range(num, num+20))
-		pool.close()
-		pool.join()
-	test2(num)
-
-import threading
 import time
+import gc
 
-class myThread (threading.Thread):
-    def __init__(self, threadID, name, num):
-        threading.Thread.__init__(self)
-        self.threadID = threadID
-        self.name = name
-        self.num = num
-    def run(self):
-        print "Starting " + self.name
-        # Get lock to synchronize threads
-        # threadLock.acquire()
-        print_time(self.name, self.num)
-        # Free lock to release next thread
-        # threadLock.release()
+class A:
+    def __init__(self):
+        self.x = 1
+        self.y = 2
+        self.why = 'no reason'
 
-def print_time(threadName, num):
-    time.sleep(2)
-    print("{} go {}".format(threadName, num))
-    test1(num)
+def time_to_append(size, append_list, item_gen):
+    t0 = time.time()
+    for i in xrange(0, size):
+        append_list.append(item_gen())
+    return time.time() - t0
 
-threadLock = threading.Lock()
-threads = []
+def test():
+    x = []
+    count = 10000
+    for i in xrange(0,1000):
+        print len(x), time_to_append(count, x, lambda: A())
 
-# Create new threads
-thread1 = myThread(1, "Thread-1", 1)
-thread2 = myThread(2, "Thread-2", 300)
+def test_nogc():
+    x = []
+    count = 10000
+    for i in xrange(0,1000):
+        gc.disable()
+        print len(x), time_to_append(count, x, lambda: A())
+        gc.enable()
 
-# Start new Threads
-thread1.start()
-thread2.start()
-
-# Add threads to thread list
-threads.append(thread1)
-threads.append(thread2)
-
-# Wait for all threads to complete
-for t in threads:
-    t.join()
-print "Exiting Main Thread"
+# gc.disable()
+aa = [1,2,3]
+bb = aa
+b = gc.get_referrers(bb)
+c = gc.get_referents(bb)
+print(repr(b))
+print(c)
+# gc.enable()
