@@ -4,12 +4,13 @@ import os
 from sklearn import preprocessing as pp
 import time
 from utils import my_iterator
-from multiprocessing import Pool
+from multiprocessing import Pool, Lock, Value
 import threading
 
 US_Dict_filepath = 'data/feature/US_Dict'
 EK_Dict_filepath = 'data/feature/8K_Dict'
 TW_Dict_filepath = 'data/feature/TW_Dict'
+# TW2_Dict_filepath = 'data/feature/test'
 TW2_Dict_filepath = 'data/feature/TW2_Dict'
 global delta
 global augment
@@ -99,21 +100,65 @@ class myThread(threading.Thread):
         
 
 ##### MULTIPROCESSING #####
+def init_proc(l, g):
+    global plock
+    global g_idx
+    plock = l
+    g_idx = g
+
 def std_by_multiprocessing(args_list):
-    pool = Pool(processes=6)
+    plock = Lock()
+    g_idx = Value('i', 0)
+    pool = Pool(processes=8, initializer=init_proc, initargs=(plock, g_idx))
     pool.map(standardize_list, args_list)
     pool.close()
     pool.join()
 
 def standardize_list(args):
+    def save_batches(batches, save_dir, name):
+        num = get_data_num()
+        save_fp = os.path.join(save_dir, name+'_'+str(num)+'.npy')
+        np.save(save_fp, batches)
+        printMsg('{}_{} finished.'.format(name, num))    
+
+    def get_data_num():
+        plock.acquire()
+        num = g_idx.value
+        g_idx.value += 1
+        plock.release()
+        return num
+
     fp_list, idx, sc_list, save_dir, name, fixed_length = args
     data_list = load_files(fp_list)
     standardize(sc_list, data_list)
     bsize = batch_size if fixed_length else 1
-    ft_batches = np.asarray([data_list[i:i+bsize] for i in range(0, len(data_list), bsize)])
-    save_fp = os.path.join(save_dir, name+'_'+str(idx)+'.npy')
-    np.save(save_fp, ft_batches)
-    printMsg('{} finished.'.format(name))
+    ft_batches = [data_list[i:i+bsize] for i in range(0, len(data_list), bsize)]
+    del data_list
+
+    new_batches = []
+    while len(ft_batches) > 0:
+        bt = ft_batches.pop()
+        inputs, targets, names = reshape_batch(bt)
+        batch = {'inputs':inputs, 'targets':targets, 'names':names}
+        new_batches.append(batch)
+        if len(new_batches) >= 5:
+            save_batches(new_batches, save_dir, name)
+            del new_batches[:]
+    if len(new_batches) > 0:
+        save_batches(new_batches, save_dir, name)
+        del new_batches[:]
+
+
+
+
+
+def reshape_batch(batch):
+    inputs, targets, names = zip(*batch)
+    scales = 3
+    tmp_in = zip(*inputs)
+    inputs = [np.array(tmp_in[x]) for x in range(scales)]
+    targets = np.array(targets, dtype=np.int32)
+    return (inputs, targets, names)
 
 def iter_length(dt_list, dt_dir):
     for idx, l in enumerate(os.listdir(dt_dir)):
@@ -308,7 +353,8 @@ if __name__ == '__main__':
     
     augment = args.augment
     delta = args.delta
-    batch_size = args.batch_size if args.training == 'tw2' else 1
+    batch_size = 5 if args.training == 'tw2' else 1
+    # batch_size = args.batch_size if args.training == 'tw2' else 1
 
     print('training data: {}'.format(kwargs['training_type']))
     print('testing data: {}'.format(kwargs['testing_type']))
